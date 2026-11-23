@@ -17,7 +17,10 @@
   <label><input id="remember" type="checkbox"> remember in this tab</label>
   <span id="status" role="status"></span>
 </header>
+<div id="target" role="note"></div>
 <main id="stage"></main>
+<!-- data, not code: limits and the default owner scope. The address hash may only tighten them. -->
+<script type="application/json" id="defaults">{"pollMin":5,"perMin":120,"inflight":6,"bytes":2000000,"owners":"target"}</script>
 <script src="loader.js"></script>
 </body>
 </html>
