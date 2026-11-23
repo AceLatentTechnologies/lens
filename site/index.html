@@ -18,9 +18,17 @@
   <span id="status" role="status"></span>
 </header>
 <div id="target" role="note"></div>
+<div id="confirm" role="dialog" aria-modal="true" aria-labelledby="confirm-title" hidden>
+  <div id="confirm-box">
+    <h2 id="confirm-title">This link widens the owners in scope</h2>
+    <p>The view you load can read whatever the key can read in these owners as well. Load only if you trust the target and these owners.</p>
+    <div id="confirm-body"></div>
+    <p><button id="confirm-yes" type="button">Load with these owners</button> <button id="confirm-no" type="button">Cancel</button></p>
+  </div>
+</div>
 <main id="stage"></main>
 <!-- data, not code: limits and the default owner scope. The address hash may only tighten them. -->
-<script type="application/json" id="defaults">{"pollMin":5,"perMin":120,"inflight":6,"bytes":2000000,"owners":"target"}</script>
+<script type="application/json" id="defaults">{"pollMin":5,"pollMax":86400,"perMin":120,"perHour":3000,"inflight":6,"bytes":2000000,"owners":"target","ownersMax":3}</script>
 <script src="loader.js"></script>
 </body>
 </html>

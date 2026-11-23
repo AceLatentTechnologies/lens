@@ -7,9 +7,11 @@
   const REPO = { test: v => /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(v) && !/(^|\/)\.\.?(\/|$)/.test(v) }, REF = /^[A-Za-z0-9_.\/-]{1,200}$/;
   // scoped to this page's path; session storage is per origin, so this is a name, not a barrier against other pages of the same origin (README)
   const SK = 'lens.key:' + location.pathname;
-  const WINDOW_MS = 60000;                       // the unit of the per-minute budget
+  const WINDOW_MS = 60000, HOUR_MS = 3600000;    // the units of the per-minute and per-hour budgets
   const SIZE = new Error('size');
-  let KEY = '', frame = null, timer = 0, gen = 0, cur = null, expectHash = null, flying = 0;
+  // text that can reorder or hide what the page shows: C0/C1 controls, soft hyphen, zero-width, bidi marks, embeddings, overrides and isolates, line/paragraph separators, BOM
+  const BAD = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/;
+  let KEY = '', frame = null, timer = 0, gen = 0, cur = null, expectHash = null, flying = 0, confirmed = '', pending = null;
   const stamps = [];
 
   const say = t => { $('status').textContent = t; };
@@ -18,23 +20,31 @@
 
   // ---- data: defaults from index.html (a JSON data block, never executed) ----
   const DEF = (() => { try { return JSON.parse($('defaults').textContent); } catch { return null; } })();
-  const defOk = !!DEF && ['pollMin', 'perMin', 'inflight', 'bytes'].every(k => Number(DEF[k]) > 0) && typeof DEF.owners === 'string';
+  const defOk = !!DEF && ['pollMin', 'pollMax', 'perMin', 'perHour', 'inflight', 'bytes', 'ownersMax'].every(k => Number.isFinite(Number(DEF[k])) && Number(DEF[k]) > 0) && Number(DEF.pollMax) >= Number(DEF.pollMin) && typeof DEF.owners === 'string';
   const num = v => (v == null || v === '' ? NaN : Number(v));
-  // the hash can only tighten: a larger poll floor, a smaller budget, in-flight cap or size cap
+  // the hash can only tighten: a larger poll floor (finite, within the ceiling), a smaller budget, in-flight cap or size cap. A value that is not finite or out of range is ignored, never applied.
   function limitsOf(p) {
-    const L = { pollMin: Number(DEF.pollMin), perMin: Number(DEF.perMin), inflight: Number(DEF.inflight), bytes: Number(DEF.bytes) };
-    const pm = num(p.get('pollmin')); if (pm > L.pollMin) L.pollMin = pm;
-    for (const [k, h] of [['perMin', 'permin'], ['inflight', 'inflight'], ['bytes', 'bytes']]) { const x = num(p.get(h)); if (x > 0 && x < L[k]) L[k] = x; }
+    const L = { pollMin: Number(DEF.pollMin), pollMax: Number(DEF.pollMax), perMin: Number(DEF.perMin), perHour: Number(DEF.perHour), inflight: Number(DEF.inflight), bytes: Number(DEF.bytes) };
+    const pm = num(p.get('pollmin')); if (Number.isFinite(pm) && pm > L.pollMin && pm <= L.pollMax) L.pollMin = pm;
+    for (const [k, h] of [['perMin', 'permin'], ['perHour', 'perhour'], ['inflight', 'inflight'], ['bytes', 'bytes']]) { const x = num(p.get(h)); if (Number.isFinite(x) && x > 0 && x < L[k]) L[k] = x; }
     return L;
   }
-  // owners in scope: the target owner, plus the defaults data, plus the hash `owners=a,b` (case-insensitive)
+  // owners in scope: the target owner, plus the defaults data (the operator's), plus the hash `owners=a,b` (the link's: shown as widened, confirmed before Load runs)
   function ownersOf(owner, p) {
-    const set = new Set([owner.toLowerCase()]), shown = [owner];
-    for (const v of [DEF.owners, p.get('owners')]) for (const x of String(v || '').split(',').map(s => s.trim()).filter(Boolean)) {
+    const set = new Set([owner.toLowerCase()]), shown = [owner], added = [];
+    for (const x of String(DEF.owners || '').split(',').map(s => s.trim()).filter(Boolean)) {
       if (x === 'target' || !/^[A-Za-z0-9_.-]{1,100}$/.test(x) || set.has(x.toLowerCase())) continue;
       set.add(x.toLowerCase()); shown.push(x.toLowerCase());
     }
-    return { set, shown };
+    const names = String(p.get('owners') || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (names.length > Number(DEF.ownersMax)) return { bad: 'rejected: owners names more than ' + Number(DEF.ownersMax) + ' extra owners' };
+    for (const x of names) {
+      if (x === 'target') continue;
+      if (!/^[A-Za-z0-9_.-]{1,100}$/.test(x)) return { bad: 'rejected: an owners name has characters other than letters, digits, dot, dash and underscore' };
+      if (set.has(x.toLowerCase())) continue;
+      set.add(x.toLowerCase()); shown.push(x.toLowerCase()); added.push(x.toLowerCase());
+    }
+    return { set, shown, added };
   }
   const inScope = (sc, owner) => sc.owners.has(owner.toLowerCase());
 
@@ -63,11 +73,13 @@
     }
     return new Blob(parts).text();
   }
-  // budget: sliding window per minute, in-flight cap
+  // budget: sliding windows per minute and per hour, in-flight cap
   function admit(lim) {
     const now = Date.now();
-    while (stamps.length && now - stamps[0] >= WINDOW_MS) stamps.shift();
-    if (stamps.length >= lim.perMin) return 'rate';
+    while (stamps.length && now - stamps[0] >= HOUR_MS) stamps.shift();
+    if (stamps.length >= lim.perHour) return 'rate';
+    let m = 0; for (let i = stamps.length - 1; i >= 0 && now - stamps[i] < WINDOW_MS; i--) m++;
+    if (m >= lim.perMin) return 'rate';
     if (flying >= lim.inflight) return 'inflight';
     stamps.push(now);
     return null;
@@ -91,6 +103,13 @@
     return u.host === 'api.github.com' && u.pathname === '/' + pth && u.search === (q < 0 ? '' : o.path.slice(q));   // what was checked is what is fetched
   };
   const ownerOfPath = p => String(p).split('?')[0].split('/')[1] || '';
+  // compare/<base>...<head>: either side may name another owner as `owner:branch` (a fork in the same network), so each named owner must be in scope
+  function compareOk(path, sc) {
+    const seg = String(path).split('?')[0].split('/');
+    if (seg[3] !== 'compare') return true;
+    let rest; try { rest = decodeURIComponent(seg.slice(4).join('/')); } catch { return false; }
+    return rest.split(/\.{2,3}/).every(x => !x.includes(':') || inScope(sc, x.split(':')[0]));
+  }
   const refuse = why => ({ ok: false, refused: why });
 
   async function handle(m, sc) {
@@ -114,7 +133,7 @@
     }
     if (only('read')) {
       if (!readOk(m.read)) return refuse('shape');
-      if (!inScope(sc, ownerOfPath(m.read.path))) return refuse('owner');
+      if (!inScope(sc, ownerOfPath(m.read.path)) || !compareOk(m.read.path, sc)) return refuse('owner');
       return guarded(sc, async () => {
         const r = await gh(API + m.read.path);
         let json = null; try { json = JSON.parse(await body(r, sc.lim.bytes)); } catch (e) { if (e === SIZE) throw e; }
@@ -125,33 +144,58 @@
   }
 
   // ---- the target: from the hash, never run without a click, unless it is the view's own navigation ----
+  // returns null (no target), { bad } (a target that is refused, with the reason) or the target
   function target() {
     if (!defOk) return null;
     const p = new URLSearchParams(location.hash.slice(1));
+    for (const [k, v] of p) if (BAD.test(k) || BAD.test(v)) return { bad: 'rejected: a hash field holds a control, bidirectional or zero-width character' };
     const [repo, ref] = (p.get('feed') || '').split('@');
     const entry = p.get('entry');
     if (!REPO.test(repo || '') || !(ref == null || ref === '' || REF.test(ref)) || !okPath(entry || '')) return null;
     const params = {}; for (const [k, v] of p) params[k] = v;
     const lim = limitsOf(p), own = ownersOf(repo.split('/')[0], p), want = num(p.get('poll'));
+    if (own.bad) return { bad: own.bad };
     let poll = 0, note = '';
-    if (want > 0 && isFinite(want)) {
-      if (want < lim.pollMin) { poll = lim.pollMin; note = 'poll ' + want + 's is below the floor, using ' + lim.pollMin + 's'; } else poll = want;
+    if (p.has('poll')) {
+      if (!Number.isFinite(want) || want <= 0) note = 'poll is not a positive finite number: not polling';
+      else if (want > lim.pollMax) note = 'poll ' + want + 's is above the maximum ' + lim.pollMax + 's: not polling';
+      else if (want < lim.pollMin) { poll = lim.pollMin; note = 'poll ' + want + 's is below the floor, using ' + lim.pollMin + 's'; } else poll = want;
     }
-    return { repo, ref: ref || '', entry, params, lim, owners: own.set, shown: own.shown, poll, note };
+    return { repo, ref: ref || '', entry, params, lim, owners: own.set, shown: own.shown, added: own.added, poll, note };
   }
-  // plain text, so the person sees what a link points at before it runs
+  const usable = t => !!t && !t.bad;
+  // plain text in labelled fields (text nodes only): the person sees what a link points at before it runs, and no field can pose as another
+  function fields(box, t, running) {
+    const row = (label, value, f, cls) => {
+      const d = document.createElement('div'), l = document.createElement('b'), v = document.createElement('span');
+      l.textContent = label + ' '; v.setAttribute('data-f', f); v.textContent = value;
+      if (cls) d.className = cls;
+      d.append(l, v); box.append(d);
+    };
+    row('repo', t.repo + (t.ref ? '@' + t.ref : ''), 'repo');
+    row('entry', t.entry, 'entry');
+    row('owners', t.shown.join(', '), 'owners');
+    if (t.added.length) row('WIDENED by this link, not by the page', t.added.join(', '), 'widened', 'widened');
+    row('limits', t.lim.perMin + ' requests/min, ' + t.lim.perHour + '/hour, ' + t.lim.inflight + ' in flight, ' + t.lim.bytes + ' bytes', 'limits');
+    if (t.poll) row('poll', 'every ' + t.poll + 's', 'poll');
+    if (t.note) row('note', t.note, 'note');
+    if (running !== undefined) row('state', running ? 'running' : 'press Load to run it', 'state');
+  }
   function render(t, running) {
-    $('target').textContent = !t ? (defOk ? 'no target in the address hash' : 'defaults missing: nothing will run')
-      : 'target ' + t.repo + (t.ref ? '@' + t.ref : '') + ' ' + t.entry + '; owners ' + t.shown.join(', ') +
-        '; limits ' + t.lim.perMin + ' requests/min, ' + t.lim.inflight + ' in flight, ' + t.lim.bytes + ' bytes' +
-        (t.poll ? '; poll every ' + t.poll + 's' : '') + (t.note ? '; ' + t.note : '') + (running ? '; running' : '; press Load to run it');
+    const box = $('target');
+    box.textContent = '';
+    box.removeAttribute('data-widened');
+    if (!t) { box.textContent = defOk ? 'no target in the address hash' : 'defaults missing: nothing will run'; return; }
+    if (t.bad) { box.textContent = t.bad; return; }
+    if (t.added.length) box.setAttribute('data-widened', 'true');
+    fields(box, t, !!running);
   }
   const canon = () => new URLSearchParams(location.hash.slice(1)).toString();
 
   async function load(t) {
     const my = ++gen;
     if (!KEY) return say('paste a key');
-    if (!t) return say('no target in the address hash');
+    if (!usable(t)) return say(t && t.bad ? t.bad : 'no target in the address hash');
     const why = admit(t.lim);
     if (why) return say('not loaded: ' + why + ' limit');
     say('loading');
@@ -159,10 +203,10 @@
     flying++;
     try {
       const r = await gh(contentsUrl(t.repo, t.entry, t.ref), 'application/vnd.github.raw+json');
-      if (!r.ok) return say('HTTP ' + r.status);
+      if (!r.ok) { if (my === gen) say('HTTP ' + r.status); return; }
       text = await body(r, t.lim.bytes);
-    } catch (e) { return say(e === SIZE ? 'too large' : 'failed: ' + (e && e.name)); } finally { flying--; }
-    if (my !== gen) return;
+    } catch (e) { if (my === gen) say(e === SIZE ? 'too large' : 'failed: ' + (e && e.name)); return; } finally { flying--; }
+    if (my !== gen) return;                              // forgotten, or the target changed, while the request was in flight
     cur = t;
     mount(text, t);
     render(t, true);
@@ -187,7 +231,7 @@
     if (!m || typeof m !== 'object') return;
     if (m.nav !== undefined) {
       const n = m.nav, p = new URLSearchParams(location.hash.slice(1));
-      if (!shapeOk(n, ['ref', 'entry']) || (n.ref != null && !REF.test(n.ref)) || (n.entry != null && !okPath(n.entry))) return;
+      if (!shapeOk(n, ['ref', 'entry']) || (n.ref != null && (typeof n.ref !== 'string' || !REF.test(n.ref))) || (n.entry != null && (!okPath(n.entry) || BAD.test(n.entry)))) return;
       const [repo, ref] = (p.get('feed') || '').split('@');
       if (!repo) return;
       if (n.ref != null) p.set('feed', repo + '@' + n.ref); else if (ref != null) p.set('feed', repo + '@' + ref);
@@ -206,39 +250,56 @@
 
   function arm(t) {
     clearInterval(timer); timer = 0;
-    if (t && t.poll > 0) timer = setInterval(() => load(t), t.poll * 1000);
+    if (usable(t) && t.poll > 0) timer = setInterval(() => load(t), t.poll * 1000);   // poll is finite and at most the ceiling, so the delay never overflows
   }
   const start = t => { arm(t); load(t); };
-  const stop = () => { clearInterval(timer); timer = 0; gen++; frame = null; cur = null; $('stage').textContent = ''; };
+  const stop = () => { clearInterval(timer); timer = 0; gen++; frame = null; cur = null; $('stage').textContent = ''; hideConfirm(); };
   const remember = () => { try { if ($('remember').checked && KEY) sessionStorage.setItem(SK, KEY); else sessionStorage.removeItem(SK); } catch {} };
+
+  // ---- a link that widens the owners needs a second, explicit confirmation in the page (not a native dialog) ----
+  function hideConfirm() { pending = null; $('confirm').hidden = true; }
+  function begin(t) {
+    if (!usable(t) || !t.added.length || confirmed === t.added.join(',')) return start(t);
+    const body = $('confirm-body'); body.textContent = ''; fields(body, t);
+    pending = { t, key: t.added.join(',') };
+    $('confirm').hidden = false;
+    $('confirm-no').focus();
+    say('confirm the widened owners, or cancel');
+  }
+  $('confirm-yes').addEventListener('click', () => {
+    const p = pending; hideConfirm();
+    if (p) { confirmed = p.key; start(p.t); }
+  });
+  $('confirm-no').addEventListener('click', () => { hideConfirm(); say('cancelled: nothing was run'); });
 
   $('load').addEventListener('click', () => {
     const v = $('key').value.trim(); $('key').value = '';
     if (v) KEY = v;
     remember();
-    start(target());
+    if (!KEY) return say('paste a key');
+    begin(target());
   });
   $('remember').addEventListener('change', remember);
   $('key').addEventListener('keydown', e => { if (e.key === 'Enter') $('load').click(); });
-  $('refresh').addEventListener('click', () => start(target()));
+  $('refresh').addEventListener('click', () => begin(target()));
   $('forget').addEventListener('click', () => {
     KEY = ''; stop();
     try { sessionStorage.removeItem(SK); } catch {}
-    render(target());
+    render(target(), false);
     say('forgotten');
   });
   window.addEventListener('hashchange', () => {
     /*[hash-guard]*/
     const h = canon(), t = target();
-    if (expectHash !== null && h === expectHash) { expectHash = null; if (KEY && t) start(t); return; }
+    if (expectHash !== null && h === expectHash) { expectHash = null; if (KEY && usable(t) && (!t.added.length || confirmed === t.added.join(','))) start(t); return; }
     expectHash = null; stop();
-    render(t);
-    say(t ? 'target changed: press Load' : 'no target in the address hash');
+    render(t, false);
+    say(t && t.bad ? t.bad : t ? 'target changed: press Load' : 'no target in the address hash');
   });
 
   if (!defOk) { $('load').disabled = true; render(null); say('defaults missing'); return; }
-  render(target());
+  render(target(), false);
   try { const k = sessionStorage.getItem(SK); if (k) { KEY = k; $('remember').checked = true; } } catch {}
   /*[init-end]*/
-  say(KEY ? (target() ? 'press Load to run the target' : 'no target in the address hash') : 'paste a key');
+  say(KEY ? (usable(target()) ? 'press Load to run the target' : (target() && target().bad) || 'no target in the address hash') : 'paste a key');
 })();
