@@ -3,7 +3,7 @@
   'use strict';
   const API = 'https://api.github.com/';
   const $ = id => document.getElementById(id);
-  const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, REF = /^[A-Za-z0-9_.\/-]{1,200}$/;
+  const REPO = { test: v => /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(v) && !/(^|\/)\.\.?(\/|$)/.test(v) }, REF = /^[A-Za-z0-9_.\/-]{1,200}$/;
   const SK = 'lens.key';
   let KEY = '', frame = null, timer = 0, gen = 0;
 
