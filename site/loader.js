@@ -11,7 +11,7 @@
   const SIZE = new Error('size');
   // text that can reorder or hide what the page shows: C0/C1 controls, soft hyphen, zero-width, bidi marks, embeddings, overrides and isolates, line/paragraph separators, BOM
   const BAD = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/;
-  let KEY = '', frame = null, timer = 0, gen = 0, cur = null, expectHash = null, flying = 0, confirmed = '', pending = null;
+  let KEY = '', frame = null, timer = 0, gen = 0, cur = null, expectHash = null, flying = 0, confirmed = '', pending = null, nFiles = 0, nBytes = 0;
   const stamps = [];
 
   const say = t => { $('status').textContent = t; };
@@ -59,10 +59,10 @@
     });
   }
   // response text with a size cap: refuse on content-length, and again while streaming
-  async function body(r, cap) {
+  async function blobOf(r, cap) {
     const cl = num(r.headers.get('content-length'));
     if (cl > cap) { try { r.body && r.body.cancel(); } catch {} throw SIZE; }
-    if (!r.body) { const t = await r.text(); if (t.length > cap) throw SIZE; return t; }
+    if (!r.body) { const b = await r.blob(); if (b.size > cap) throw SIZE; return b; }
     const rd = r.body.getReader(), parts = []; let n = 0;
     for (;;) {
       const { done, value } = await rd.read();
@@ -71,8 +71,9 @@
       if (n > cap) { try { rd.cancel(); } catch {} throw SIZE; }
       parts.push(value);
     }
-    return new Blob(parts).text();
+    return new Blob(parts);
   }
+  const body = async (r, cap) => (await blobOf(r, cap)).text();
   // budget: sliding windows per minute and per hour, in-flight cap
   function admit(lim) {
     const now = Date.now();
@@ -92,8 +93,23 @@
   }
 
   const contentsUrl = (repo, path, ref) => API + 'repos/' + repo + '/contents/' + enc(path) + (ref ? '?ref=' + encodeURIComponent(ref) : '');
+  // site mode data: absent or invalid data turns the site verbs off (other verbs are unaffected). The hash only tightens.
+  const siteOk = defOk && ['siteFiles', 'siteBytes', 'siteDepth'].every(k => Number.isInteger(DEF[k]) && DEF[k] > 0) && Number.isInteger(DEF.siteRoot) && DEF.siteRoot >= 0
+    && !!DEF.siteMimes && typeof DEF.siteMimes === 'object' && !Array.isArray(DEF.siteMimes) && Object.values(DEF.siteMimes).every(v => typeof v === 'string');
+  const dirOf = p => p.slice(0, Math.max(0, p.lastIndexOf('/')));
+  const floorOf = (entry, root) => { const d = dirOf(entry), s = d ? d.split('/') : []; return s.slice(0, Math.max(0, s.length - root)).join('/'); };
+  function siteOf(p, entry) {
+    if (!siteOk) return null;
+    const S = { files: DEF.siteFiles, bytes: DEF.siteBytes, depth: DEF.siteDepth, root: DEF.siteRoot, mimes: { ...DEF.siteMimes } };
+    for (const [k, h, lo] of [['files', 'sitefiles', 1], ['bytes', 'sitebytes', 1], ['depth', 'sitedepth', 1], ['root', 'siteroot', 0]]) { const x = num(p.get(h)); if (Number.isInteger(x) && x >= lo && x < S[k]) S[k] = x; }
+    const want = (p.get('sitemimes') || '').toLowerCase().split(',').filter(x => x in S.mimes);
+    if (want.length) S.mimes = Object.fromEntries(want.map(x => [x, S.mimes[x]]));
+    return { ...S, floor: floorOf(entry, S.root), dir: dirOf(entry) };
+  }
+  const extOf = path => { const b = path.slice(path.lastIndexOf('/') + 1), i = b.lastIndexOf('.'); return i < 0 ? '' : b.slice(i + 1).toLowerCase(); };
+  const typeOf = (path, mimes) => (mimes && Object.prototype.hasOwnProperty.call(mimes, extOf(path)) ? mimes[extOf(path)] : 'application/octet-stream');
   const shapeOk = (o, keys) => o && typeof o === 'object' && !Array.isArray(o) && Object.keys(o).every(k => keys.includes(k));
-  const reqOk = o => shapeOk(o, ['repo', 'path', 'ref']) && REPO.test(o.repo || '') && okPath(o.path) && (o.ref == null || REF.test(o.ref));
+  const reqOk = o => shapeOk(o, ['repo', 'path', 'ref', 'bin']) && (o.bin === undefined || typeof o.bin === 'boolean') && REPO.test(o.repo || '') && okPath(o.path) && (o.ref == null || REF.test(o.ref));
   const readOk = o => {
     if (!shapeOk(o, ['path']) || typeof o.path !== 'string' || o.path.length > 600) return false;
     if (/[\\#\u0000-\u001f]|%2e|%2f|%5c/i.test(o.path)) return false;
@@ -117,9 +133,34 @@
     if (only('get')) {
       if (!reqOk(m.get)) return refuse('shape');
       if (!inScope(sc, m.get.repo.split('/')[0])) return refuse('owner');
+      if (m.get.bin === true) {
+        if (!sc.site) return refuse('off');
+        return guarded(sc, async () => {
+          const r = await gh(contentsUrl(m.get.repo, m.get.path, m.get.ref), 'application/vnd.github.raw+json');
+          return { ok: r.ok, status: r.status, bytes: r.ok ? await (await blobOf(r, sc.lim.bytes)).arrayBuffer() : new ArrayBuffer(0), type: typeOf(m.get.path, sc.site.mimes) };
+        });
+      }
       return guarded(sc, async () => {
         const r = await gh(contentsUrl(m.get.repo, m.get.path, m.get.ref), 'application/vnd.github.raw+json');
         return { ok: r.ok, status: r.status, text: r.ok ? await body(r, sc.lim.bytes) : '' };
+      });
+    }
+    if (only('file')) {
+      const f = m.file, S = sc.site;
+      if (!S) return refuse('off');
+      if (!shapeOk(f, ['path', 'bin']) || !okPath(f.path) || (f.bin !== undefined && typeof f.bin !== 'boolean')) return refuse('shape');
+      if (!Object.prototype.hasOwnProperty.call(S.mimes, extOf(f.path))) return refuse('mime');
+      if (S.floor && !f.path.startsWith(S.floor + '/')) return refuse('path');
+      if (nFiles >= S.files) return refuse('files');
+      if (nBytes >= S.bytes) return refuse('bytes');
+      const left = S.bytes - nBytes, cap = Math.min(sc.lim.bytes, left);
+      nFiles++;
+      return guarded(sc, async () => {
+        const r = await gh(contentsUrl(sc.repo, f.path, sc.ref), 'application/vnd.github.raw+json');
+        if (!r.ok) return { ok: false, status: r.status, ...(f.bin ? { bytes: new ArrayBuffer(0), type: typeOf(f.path, S.mimes) } : { text: '' }) };
+        let b; try { b = await blobOf(r, cap); } catch (e) { if (e === SIZE && left < sc.lim.bytes) return refuse('bytes'); throw e; }
+        nBytes += b.size;
+        return f.bin ? { ok: true, status: r.status, bytes: await b.arrayBuffer(), type: typeOf(f.path, S.mimes) } : { ok: true, status: r.status, text: await b.text() };
       });
     }
     if (only('list')) {
@@ -161,7 +202,7 @@
       else if (want > lim.pollMax) note = 'poll ' + want + 's is above the maximum ' + lim.pollMax + 's: not polling';
       else if (want < lim.pollMin) { poll = lim.pollMin; note = 'poll ' + want + 's is below the floor, using ' + lim.pollMin + 's'; } else poll = want;
     }
-    return { repo, ref: ref || '', entry, params, lim, owners: own.set, shown: own.shown, added: own.added, poll, note };
+    return { repo, ref: ref || '', entry, params, lim, owners: own.set, shown: own.shown, added: own.added, poll, note, site: siteOf(p, entry) };
   }
   const usable = t => !!t && !t.bad;
   // plain text in labelled fields (text nodes only): the person sees what a link points at before it runs, and no field can pose as another
@@ -177,6 +218,7 @@
     row('owners', t.shown.join(', '), 'owners');
     if (t.added.length) row('WIDENED by this link, not by the page', t.added.join(', '), 'widened', 'widened');
     row('limits', t.lim.perMin + ' requests/min, ' + t.lim.perHour + '/hour, ' + t.lim.inflight + ' in flight, ' + t.lim.bytes + ' bytes', 'limits');
+    row('site', t.site ? t.site.files + ' files, ' + t.site.bytes + ' bytes, depth ' + t.site.depth + ', root ' + t.site.root + ', types ' + Object.keys(t.site.mimes).join(' ') : 'off', 'site');
     if (t.poll) row('poll', 'every ' + t.poll + 's', 'poll');
     if (t.note) row('note', t.note, 'note');
     if (running !== undefined) row('state', running ? 'running' : 'press Load to run it', 'state');
@@ -214,12 +256,12 @@
   }
 
   function mount(text, t) {
-    $('stage').textContent = '';
+    $('stage').textContent = ''; nFiles = 0; nBytes = 0;
     const f = document.createElement('iframe');
     f.setAttribute('sandbox', 'allow-scripts');          // scripts only: opaque origin, no parent or key access
     f.setAttribute('title', 'view');
     // '*' is the only targetOrigin that reaches an opaque-origin frame. The source is sent once per mounted frame, to the frame this page created.
-    f.addEventListener('load', () => f.contentWindow.postMessage({ run: text, ctx: { repo: t.repo, ref: t.ref, entry: t.entry, params: t.params } }, '*'), { once: true });
+    f.addEventListener('load', () => f.contentWindow.postMessage({ run: text, ctx: { repo: t.repo, ref: t.ref, entry: t.entry, params: t.params, site: t.site ? { floor: t.site.floor, dir: t.site.dir, files: t.site.files, bytes: t.site.bytes, depth: t.site.depth, root: t.site.root, mimes: t.site.mimes } : null } }, '*'), { once: true });
     f.src = 'sandbox.html';
     frame = f;
     $('stage').appendChild(f);
@@ -253,15 +295,16 @@
     if (usable(t) && t.poll > 0) timer = setInterval(() => load(t), t.poll * 1000);   // poll is finite and at most the ceiling, so the delay never overflows
   }
   const start = t => { arm(t); load(t); };
-  const stop = () => { clearInterval(timer); timer = 0; gen++; frame = null; cur = null; $('stage').textContent = ''; hideConfirm(); };
+  const ckey = t => t.repo + '|' + t.added.join(',');
+  const stop = () => { clearInterval(timer); timer = 0; gen++; frame = null; cur = null; nFiles = 0; nBytes = 0; $('stage').textContent = ''; hideConfirm(); };
   const remember = () => { try { if ($('remember').checked && KEY) sessionStorage.setItem(SK, KEY); else sessionStorage.removeItem(SK); } catch {} };
 
   // ---- a link that widens the owners needs a second, explicit confirmation in the page (not a native dialog) ----
   function hideConfirm() { pending = null; $('confirm').hidden = true; }
   function begin(t) {
-    if (!usable(t) || !t.added.length || confirmed === t.added.join(',')) return start(t);
+    if (!usable(t) || !t.added.length || confirmed === ckey(t)) return start(t);
     const body = $('confirm-body'); body.textContent = ''; fields(body, t);
-    pending = { t, key: t.added.join(',') };
+    pending = { t, key: ckey(t) };
     $('confirm').hidden = false;
     $('confirm-no').focus();
     say('confirm the widened owners, or cancel');
@@ -280,10 +323,10 @@
     begin(target());
   });
   $('remember').addEventListener('change', remember);
-  $('key').addEventListener('keydown', e => { if (e.key === 'Enter') $('load').click(); });
+  $('key').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('load').click(); } });
   $('refresh').addEventListener('click', () => begin(target()));
   $('forget').addEventListener('click', () => {
-    KEY = ''; stop();
+    KEY = ''; confirmed = ''; stop();
     try { sessionStorage.removeItem(SK); } catch {}
     render(target(), false);
     say('forgotten');
@@ -291,7 +334,7 @@
   window.addEventListener('hashchange', () => {
     /*[hash-guard]*/
     const h = canon(), t = target();
-    if (expectHash !== null && h === expectHash) { expectHash = null; if (KEY && usable(t) && (!t.added.length || confirmed === t.added.join(','))) start(t); return; }
+    if (expectHash !== null && h === expectHash) { expectHash = null; if (KEY && usable(t) && (!t.added.length || confirmed === ckey(t))) start(t); return; }
     expectHash = null; stop();
     render(t, false);
     say(t && t.bad ? t.bad : t ? 'target changed: press Load' : 'no target in the address hash');
