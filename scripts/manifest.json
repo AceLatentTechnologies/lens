@@ -1,0 +1,19 @@
+{
+ "v": 1,
+ "prelude": "scripts/lib.mjs",
+ "verbs": {
+  "add": "scripts/add.mjs",
+  "supersede": "scripts/add.mjs",
+  "render": "scripts/render.mjs",
+  "ls": "scripts/render.mjs",
+  "check": "scripts/check.mjs",
+  "pin": "scripts/pin.mjs"
+ },
+ "blobs": {
+  "scripts/add.mjs": "0692c4edf017d17ad4e1c1fb23878ccae27a2fff",
+  "scripts/check.mjs": "87c6c60f2eb2d190a8aac55511a21cb9fa1b9e6c",
+  "scripts/lib.mjs": "f17e372005a066888222b2d91dadd5c544a4a63e",
+  "scripts/pin.mjs": "864e877e717280d0ce8a7f5f63a7b9ebdf9676af",
+  "scripts/render.mjs": "9c1e2115f296746c076a1e54d21fda0f528e5ca1"
+ }
+}
