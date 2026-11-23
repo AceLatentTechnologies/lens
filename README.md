@@ -15,7 +15,7 @@ Pages: https://acelatenttechnologies.github.io/lens/ (org AceLatentTechnologies;
 ## Key
 Held in memory of the page only. Not in the address, not in cookies, not in local storage. Session storage only if "remember in this tab" is ticked; unticking clears it at once. Sent only as a request header to `https://api.github.com`. Forget clears it.
 
-The session storage name includes this page's path. That is a name, not a barrier: session storage is shared by every page of the same origin (`acelatenttechnologies.github.io`, so the organisation's other Pages sites), and a script there could read it. Do not tick "remember" on a shared origin you do not trust, or serve the page from its own origin.
+The session storage name includes this page's path. That is a name, not a barrier: session storage is shared by every page of the same origin (here the organisation's whole Pages host, so its other Pages sites), and a script there could read it. Do not tick "remember" on a shared origin you do not trust, or serve the page from its own origin.
 
 ## Owner scope
 A view can read whatever the key can read, so by default it may only read repositories of the owner named in the target. More owners are data: the `owners` field of the defaults block in `site/index.html` (default `target`, meaning only the target's owner), or `owners=a,b` in the hash. Case-insensitive. A refused read answers `{ok:false, refused:'owner'}`. Because the hash can widen the scope, the page shows the owners before anything runs; a link that widens it is visible, not blocked.
