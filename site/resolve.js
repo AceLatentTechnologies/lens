@@ -5,9 +5,9 @@
   function dirOf(p) { var i = p.lastIndexOf('/'); return i < 0 ? '' : p.slice(0, i); }
   function floorOf(entry, root) { var d = dirOf(entry), s = d ? d.split('/') : []; return s.slice(0, Math.max(0, s.length - root)).join('/'); }
   function chk(t) { if (BAD.test(t)) return 'control'; if (t.indexOf(BS) >= 0) return 'backslash'; if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(t)) return 'scheme'; if (/^\/\//.test(t)) return 'authority'; return null; }
-  function resolve(ref, from, floor) {
+  function resolve(ref, from, floor, maxLen) {
     if (typeof ref !== 'string') return { ok: false, why: 'type' };
-    if (ref.length < 1 || ref.length > 400) return { ok: false, why: 'length' };
+    if (!Number.isInteger(maxLen) || maxLen < 1 || ref.length < 1 || ref.length > maxLen) return { ok: false, why: 'length' };
     var t = ref.split('#')[0].split('?')[0];
     if (!t) return { ok: false, why: 'fragment' };
     var w = chk(t); if (w) return { ok: false, why: w };

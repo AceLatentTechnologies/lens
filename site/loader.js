@@ -94,15 +94,15 @@
 
   const contentsUrl = (repo, path, ref) => API + 'repos/' + repo + '/contents/' + enc(path) + (ref ? '?ref=' + encodeURIComponent(ref) : '');
   // site mode data: absent or invalid data turns the site verbs off (other verbs are unaffected). The hash only tightens.
-  const siteOk = defOk && ['siteFiles', 'siteBytes', 'siteDepth'].every(k => Number.isInteger(DEF[k]) && DEF[k] > 0) && Number.isInteger(DEF.siteRoot) && DEF.siteRoot >= 0
+  const siteOk = defOk && ['siteFiles', 'siteBytes', 'siteDepth', 'siteRef'].every(k => Number.isInteger(DEF[k]) && DEF[k] > 0) && Number.isInteger(DEF.siteRoot) && DEF.siteRoot >= 0
     && !!DEF.siteMimes && typeof DEF.siteMimes === 'object' && !Array.isArray(DEF.siteMimes) && Object.values(DEF.siteMimes).every(v => typeof v === 'string');
   const dirOf = p => p.slice(0, Math.max(0, p.lastIndexOf('/')));
   const floorOf = (entry, root) => { const d = dirOf(entry), s = d ? d.split('/') : []; return s.slice(0, Math.max(0, s.length - root)).join('/'); };
   function siteOf(p, entry) {
     if (!siteOk) return null;
-    const S = { files: DEF.siteFiles, bytes: DEF.siteBytes, depth: DEF.siteDepth, root: DEF.siteRoot, mimes: { ...DEF.siteMimes } };
-    for (const [k, h, lo] of [['files', 'sitefiles', 1], ['bytes', 'sitebytes', 1], ['depth', 'sitedepth', 1], ['root', 'siteroot', 0]]) { const x = num(p.get(h)); if (Number.isInteger(x) && x >= lo && x < S[k]) S[k] = x; }
-    const want = (p.get('sitemimes') || '').toLowerCase().split(',').filter(x => x in S.mimes);
+    const S = { files: DEF.siteFiles, bytes: DEF.siteBytes, depth: DEF.siteDepth, ref: DEF.siteRef, root: DEF.siteRoot, mimes: { ...DEF.siteMimes } };
+    for (const [k, h, lo] of [['files', 'sitefiles', 1], ['bytes', 'sitebytes', 1], ['depth', 'sitedepth', 1], ['ref', 'siteref', 1], ['root', 'siteroot', 0]]) { const x = num(p.get(h)); if (Number.isInteger(x) && x >= lo && x < S[k]) S[k] = x; }
+    const want = (p.get('sitemimes') || '').toLowerCase().split(',').filter(x => Object.prototype.hasOwnProperty.call(S.mimes, x));
     if (want.length) S.mimes = Object.fromEntries(want.map(x => [x, S.mimes[x]]));
     return { ...S, floor: floorOf(entry, S.root), dir: dirOf(entry) };
   }
@@ -261,7 +261,7 @@
     f.setAttribute('sandbox', 'allow-scripts');          // scripts only: opaque origin, no parent or key access
     f.setAttribute('title', 'view');
     // '*' is the only targetOrigin that reaches an opaque-origin frame. The source is sent once per mounted frame, to the frame this page created.
-    f.addEventListener('load', () => f.contentWindow.postMessage({ run: text, ctx: { repo: t.repo, ref: t.ref, entry: t.entry, params: t.params, site: t.site ? { floor: t.site.floor, dir: t.site.dir, files: t.site.files, bytes: t.site.bytes, depth: t.site.depth, root: t.site.root, mimes: t.site.mimes } : null } }, '*'), { once: true });
+    f.addEventListener('load', () => f.contentWindow.postMessage({ run: text, ctx: { repo: t.repo, ref: t.ref, entry: t.entry, params: t.params, site: t.site ? { floor: t.site.floor, dir: t.site.dir, files: t.site.files, bytes: t.site.bytes, depth: t.site.depth, ref: t.site.ref, root: t.site.root, mimes: t.site.mimes } : null } }, '*'), { once: true });
     f.src = 'sandbox.html';
     frame = f;
     $('stage').appendChild(f);
