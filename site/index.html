@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src https://api.github.com; frame-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lens</title>
+<link rel="stylesheet" href="lens.css">
+</head>
+<body>
+<header>
+  <input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="key" aria-label="key">
+  <button id="load" type="button">Load</button>
+  <button id="refresh" type="button">Refresh</button>
+  <button id="forget" type="button">Forget</button>
+  <label><input id="remember" type="checkbox"> remember in this tab</label>
+  <span id="status" role="status"></span>
+</header>
+<main id="stage"></main>
+<script src="loader.js"></script>
+</body>
+</html>

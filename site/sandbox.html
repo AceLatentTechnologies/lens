@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'">
+<script data-b>
+(() => {
+  'use strict';
+  const P = window.parent, pend = new Map();
+  let n = 0;
+  const call = (k, v) => new Promise(res => { const id = ++n; pend.set(id, res); P.postMessage({ id, [k]: v }, '*'); });
+  window.lens = {
+    ctx: null,
+    get: (repo, path, ref) => call('get', { repo, path, ref }),
+    list: (repo, path, ref) => call('list', { repo, path, ref }),
+    read: path => call('read', { path }),
+    nav: o => P.postMessage({ nav: o }, '*')
+  };
+  const fresh = root => {
+    for (const s of [...root.querySelectorAll('script:not([data-b])')]) {
+      const t = document.createElement('script');
+      for (const a of s.attributes) t.setAttribute(a.name, a.value);
+      t.textContent = s.textContent;
+      s.replaceWith(t);
+    }
+  };
+  addEventListener('message', e => {
+    if (e.source !== P) return;
+    const m = e.data || {};
+    if (typeof m.run === 'string') {
+      window.lens.ctx = m.ctx;
+      const d = new DOMParser().parseFromString(m.run, 'text/html');
+      for (const x of [...d.head.childNodes]) document.head.appendChild(document.importNode(x, true));
+      for (const x of [...d.body.childNodes]) document.body.appendChild(document.importNode(x, true));
+      fresh(document);
+    } else if (pend.has(m.id)) { pend.get(m.id)(m); pend.delete(m.id); }
+  });
+})();
+</script>
+</head>
+<body></body>
+</html>
