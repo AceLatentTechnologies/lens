@@ -34,6 +34,7 @@ A view in the frame talks to the page with `postMessage`; `window.lens` wraps it
 - `{id, get: {repo, path, ref}}` -> `{id, ok, status, text}`
 - `{id, list: {repo, path, ref}}` -> `{id, ok, status, items}`
 - `{id, read: {path}}` -> `{id, ok, status, json}`; `path` starts with `repos/<owner>/<repo>/`, with no empty, `.` or `..` segments; the path that was checked is the path that is fetched
+- `{id, file: {path, bin?}}` -> `{id, ok, status, text}` or with `bin` `{id, ok, status, bytes, type}` (site mode, below)
 - `{nav: {ref, entry}}` changes the target in the hash and re-runs it (the one change that runs without a click; same repository, same budget)
 
 Only GET requests to `api.github.com` are made, without following redirects (`redirect: 'error'`). A redirect, including one from a renamed repository, fails and the view gets `{ok:false, refused:'error'}`; that is the price of never sending the key to another host. Any other shape or host is refused: `{id, ok: false, refused}`.
@@ -44,6 +45,18 @@ The frame document (`sandbox.html`) has its own policy: scripts only from its ow
 The policy is a barrier for the key and the page, and for the request channels listed above. It is not a barrier for the data (next section).
 
 Messages from the frame to the page use the page's own origin as target origin, the strictest value. Messages from the page to the frame use `*`, the only target that reaches an opaque-origin frame; the damage this allows is limited because the page sends the source once per frame, replies only to the frame it mounted, and the frame accepts the source once and only from its parent.
+
+## Site mode
+The entry file may be an ordinary static site: an HTML page that references stylesheets, scripts (classic and module), images, fonts and JSON by relative path, resolved inside the target repository at the target ref. The sandbox reads each file through the host `file` verb, one request per distinct path per load. There is no network in the sandbox, so dependencies are vendored into the repository (no bare module specifiers, no CDN, no import map). A single-file view with no relative references works as before and makes no `file` request.
+
+Caps are data, in the defaults block of `site/index.html`, and the hash can only tighten them (`sitefiles`, `sitebytes`, `sitedepth`, `siteroot` with an integer below the data value; `sitemimes=png,css` narrows the type table to the names listed, unknown names ignored): `siteFiles` 200 file requests per load, `siteBytes` 8000000 bytes per load, `siteDepth` 8 levels of module or stylesheet import, `siteRoot` 0 parent levels above the entry directory, `siteMimes` the allowed extensions and their media types. Refusals answer `{ok:false, refused:'mime'|'path'|'files'|'bytes'|'off'}`; `off` means the site data is missing or invalid, and other verbs are unaffected. The caps bound requests and size; they do not bound what leaves (see below).
+
+Protocol additions: `{file: {path, bin?}}` (repo and ref are the target's, the view cannot choose) and `get` with `bin: true` (`lens.getBytes(repo, path, ref)`) answer `{ok, status, bytes, type}`.
+
+Sandbox policy: the frame document policy is widened by `blob:` only, on script-src, img-src and font-src. Modules, images and fonts are served to the page as blob URLs made from the fetched bytes; stylesheets are inlined, so style-src is unchanged. Connect, frames, workers, media and objects stay denied, and `unsafe-inline` is not added.
+
+### Residual risk in site mode (not closed)
+Site code is more code, with the same data reach: it reads what the key can read inside the owner scope. These channels are open and the policy does not stop them: link rel=prerender and its variants (a full GET to the target host with the data in the address); navigation of the view or a child frame by location, anchor click, iframe src, meta refresh or a document.write iframe, where the browser looks up and connects to the target host before the policy blocks the request, and the name lookup carries the data. N1 is accepted for feeds the org controls (R42) and is not closed. Point the lens only at such feeds. Preconnect, dns-prefetch and speculation rules: not exercised, unproven; nothing here claims they are covered.
 
 ## Residual risk (not closed)
 - A view can send the data it reads to any host. The sandbox does not contain the data. Tested in Chrome with a local sink: `<link rel=prerender href=...>` (dynamic or in the view's markup) makes the browser send a real GET to that host with the data in the address, despite the policy; creating many child frames makes one connection (name lookup) per frame, so an unbounded number of host names; a meta refresh or frame navigation starts a connection to its target before the policy blocks the request. A MutationObserver that removes such elements does not help: prerender starts when the element is inserted, before the observer runs (tested; none is shipped). Content-Security-Policy `prefetch-src` and `navigate-to`, the `allow` attribute, `credentialless` and `referrerpolicy` had no effect in the same tests, and an iframe `csp` attribute or Trusted Types broke the view. Other browsers and versions were not tested.
