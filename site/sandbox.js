@@ -1,5 +1,6 @@
-// Runs inside the sandboxed frame (opaque origin). It is a file, not an inline script, so the document policy can forbid inline script:
-// a srcdoc child frame inherits that policy and then cannot run anything, so it cannot recover the constructors removed below.
+// Runs inside the sandboxed frame (opaque origin). It is a file, not an inline script, so the document policy can forbid inline script.
+// Site mode: script, img and font also allow blob: (no unsafe-inline). A child srcdoc frame inherits that policy, but it cannot run a blob script
+// of this frame: Chromium refuses the cross-origin blob load. That is browser behaviour pinned by a test, not a property of the CSP.
 // Site mode (R41): when the host passes ctx.site (data: floor, dir, depth, mimes; the caps themselves are enforced by the host),
 // the entry is served as a virtual origin. Every file comes through the host `file` verb; this frame has no network of its own.
 (() => {
@@ -65,8 +66,8 @@
     const give = (e, what) => note(e instanceof Fail ? e.reason : 'error', e instanceof Fail ? e.what : what);
     const where = (ref, from) => {
       if (!isRef(ref)) return { ok: false, why: 'path' };
-      const r = SR.resolve(ref, from, S.floor);
-      return r.ok ? r : { ok: false, why: 'path' };
+      const r = SR.resolve(ref, from, S.floor, S.ref);
+      return r.ok ? r : { ok: false, why: r.why === 'length' ? 'length' : 'path' };
     };
     // the host answers with a refusal reason; once the files or bytes budget is spent, nothing more is asked
     function fileOf(path) {
@@ -94,7 +95,7 @@
         const imp = m[2] || m[4], ref = imp || m[6];
         if (ref === '' || /^(data:|#)/i.test(ref) || (!imp && !isRef(ref))) { out += imp ? '' : m[0]; if (imp && !/^data:/i.test(ref)) note('path', ref); continue; }
         const w = where(ref, dir);
-        if (!w.ok) { note('path', ref); out += imp ? '' : 'url("")'; continue; }
+        if (!w.ok) { note(w.why, ref); out += imp ? '' : 'url("")'; continue; }
         try {
           out += imp ? await css(w.path, depth + 1, stack) : 'url("' + await blobUrl(w.path) + '")';
         } catch (e) { give(e, ref); out += imp ? '' : 'url("")'; }
@@ -109,24 +110,85 @@
     }
 
     // ---- modules: a static scan of relative specifiers, one blob per module, specifiers rewritten to the blobs (no inline import map: the policy has no 'unsafe-inline') ----
-    // returns [{from, to, spec}] for string literals right after `from`, `import` and `import(`; comments and the insides of other strings are skipped
+    // scan returns {hits: [{from, to, spec}], dyn}: hits are string literals right after `from`, `import` and `import(`; comments and the insides of other strings are skipped.
+    // dyn is true when an `import(` takes anything but one string literal. null means the scanner lost sync (a raw newline in a quote string, an unterminated string,
+    // template or comment): the module is then refused, never guessed at. Regular expression literals and nested templates are read, not guessed.
+    const AFTER = /^(?:return|typeof|case|do|else|in|of|instanceof|new|delete|void|throw|yield|await)$/;
     function scan(s) {
-      const hits = []; let code = '', i = 0;
+      const hits = [], tpl = []; let code = '', i = 0, prev = '', dyn = false;
+      const blank = t => t.replace(/[^\n]/g, ' ');
+      const skip = j => {                              // past white space and comments
+        for (;;) {
+          while (j < s.length && /\s/.test(s[j])) j++;
+          if (s[j] === '/' && s[j + 1] === '/') { const e = s.indexOf('\n', j); j = e < 0 ? s.length : e; }
+          else if (s[j] === '/' && s[j + 1] === '*') { const e = s.indexOf('*/', j + 2); if (e < 0) return s.length; j = e + 2; }
+          else return j;
+        }
+      };
+      const str = j => {                               // index after the closing quote of the quote string at j, or -1
+        const q = s[j]; j++;
+        while (j < s.length && s[j] !== q) { if (s[j] === '\n' || s[j] === '\r') return -1; j += s[j] === '\\' ? 2 : 1; }
+        return j < s.length ? j + 1 : -1;
+      };
+      const regex = j => {                             // index after the regular expression literal at j, or -1 (the slash is then a division)
+        let k = j + 1, cls = false;
+        for (; k < s.length; k++) {
+          const c = s[k];
+          if (c === '\n' || c === '\r') return -1;
+          if (c === '\\') k++;
+          else if (c === '[') cls = true;
+          else if (c === ']') cls = false;
+          else if (c === '/' && !cls) { k++; while (/[A-Za-z]/.test(s[k] || '')) k++; return k; }
+        }
+        return -1;
+      };
+      const tail = () => {                             // inside a template: to the closing backtick (true) or the next ${ (false); null at the end of the source
+        while (i < s.length) {
+          const c = s[i];
+          if (c === '\\') { code += blank(s.slice(i, i + 2)); i += 2; }
+          else if (c === '`') { code += c; i++; prev = c; return true; }
+          else if (c === '$' && s[i + 1] === '{') { code += '${'; i += 2; tpl.push(0); prev = '{'; return false; }
+          else { code += c === '\n' ? c : ' '; i++; }
+        }
+        return null;
+      };
       while (i < s.length) {
         const c = s[i], d = s[i + 1];
         if (c === '/' && d === '/') { const j = s.indexOf('\n', i), e = j < 0 ? s.length : j; code += ' '.repeat(e - i); i = e; }
-        else if (c === '/' && d === '*') { let j = s.indexOf('*/', i + 2); j = j < 0 ? s.length : j + 2; code += s.slice(i, j).replace(/[^\n]/g, ' '); i = j; }
-        else if (c === '"' || c === "'" || c === '`') {
-          let j = i + 1; while (j < s.length && s[j] !== c) j += s[j] === '\\' ? 2 : 1;
-          j = Math.min(j + 1, s.length);
-          if (c !== '`' && /(?:\bfrom|\bimport|\bimport\s*\()\s*$/.test(code) && s[j - 1] === c && !s.slice(i + 1, j - 1).includes('\n')) hits.push({ from: i + 1, to: j - 1, spec: s.slice(i + 1, j - 1) });
-          code += c + ' '.repeat(Math.max(0, j - i - 2)) + (j - i > 1 ? c : ''); i = j;
-        } else { code += c; i++; }
+        else if (c === '/' && d === '*') { const j = s.indexOf('*/', i + 2); if (j < 0) return null; code += blank(s.slice(i, j + 2)); i = j + 2; }
+        else if (c === '"' || c === "'") {
+          const j = str(i); if (j < 0) return null;
+          if (/(?:\bfrom|\bimport|\bimport\s*\()\s*$/.test(code)) hits.push({ from: i + 1, to: j - 1, spec: s.slice(i + 1, j - 1) });
+          code += c + ' '.repeat(j - i - 2) + c; i = j; prev = c;
+        } else if (c === '`') { code += c; i++; if (tail() === null) return null; }
+        else if (c === '/' && (prev === '' || /^[(,=:[!&|?{};+\-*%<>~^]$/.test(prev) || AFTER.test(prev))) {
+          const j = regex(i);
+          if (j < 0) { code += c; i++; prev = c; } else { code += ' '.repeat(j - i); i = j; prev = 'x'; }
+        } else if (/[A-Za-z_$]/.test(c)) {
+          let j = i + 1; while (j < s.length && /[\w$]/.test(s[j])) j++;
+          const w = s.slice(i, j);
+          if (w === 'import' && !/\.\s*$/.test(code)) {
+            const k = skip(j);
+            if (s[k] === '(') {
+              const m = skip(k + 1), q = s[m];
+              if (q !== '"' && q !== "'") dyn = true;
+              else { const e = str(m); if (e < 0) return null; const n = skip(e); if (s[n] !== ')' && s[n] !== ',') dyn = true; }
+            }
+          }
+          code += w; i = j; prev = w;
+        } else if (c === '{' && tpl.length) { tpl[tpl.length - 1]++; code += c; i++; prev = c; }
+        else if (c === '}' && tpl.length) {
+          if (tpl[tpl.length - 1] > 0) { tpl[tpl.length - 1]--; code += c; i++; prev = c; }
+          else { tpl.pop(); code += c; i++; if (tail() === null) return null; }
+        } else { code += c; i++; if (!/\s/.test(c)) prev = /\d/.test(c) ? 'x' : c; }
       }
-      return hits;
+      return tpl.length ? null : { hits, dyn };
     }
-    async function link(src, dir, depth, stack) {
-      const hits = scan(src);
+    async function link(src, dir, depth, stack, name) {
+      const sc = scan(src);
+      if (!sc) throw fail('scan', name + ' (the import scanner cannot read this module reliably)');
+      if (sc.dyn) throw fail('dynamic', name + ' (import() with a computed specifier is not followed)');
+      const hits = sc.hits;
       for (const h of hits) {                       // refuse before any dependency is requested
         if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(h.spec) || h.spec.startsWith('//')) throw fail('path', h.spec);
         if (!/^(\.\.?\/|\/)/.test(h.spec)) throw fail('bare', h.spec);
@@ -135,7 +197,7 @@
       for (const h of hits) {
         if (urls.has(h.spec)) continue;
         const w = where(h.spec, dir);
-        if (!w.ok) throw fail('path', h.spec);
+        if (!w.ok) throw fail(w.why, h.spec);
         urls.set(h.spec, await mod(w.path, depth + 1, stack));
       }
       let out = '', at = 0;
@@ -145,7 +207,7 @@
     function mod(path, depth, stack) {
       if (stack.includes(path)) return Promise.reject(fail('cycle', path));
       if (depth > S.depth) return Promise.reject(fail('depth', path));
-      if (!mods.has(path)) mods.set(path, need(path).then(r => link(dec(r.bytes), dirOf(path), depth, [...stack, path])));
+      if (!mods.has(path)) mods.set(path, need(path).then(r => link(dec(r.bytes), dirOf(path), depth, [...stack, path], path)));
       return mods.get(path);
     }
 
@@ -154,7 +216,7 @@
     async function answer(ref, method) {
       if (!READ.includes(String(method || READ[0]).toUpperCase())) throw new TypeError('lens: the site is read-only');
       const w = where(ref, S.dir);
-      if (!w.ok) { note('path', ref); throw new TypeError('lens: refused path'); }
+      if (!w.ok) { note(w.why, ref); throw new TypeError('lens: refused path'); }
       const r = await fileOf(w.path);
       if (!r.ok && r.why !== 'status') { note(r.why, w.path); throw new TypeError('lens: refused ' + r.why); }
       return r;
@@ -200,7 +262,7 @@
       if (h.startsWith('#')) return;
       e.preventDefault();
       const w = where(h, S.dir);
-      if (!w.ok) return note('path', h);
+      if (!w.ok) return note(w.why, h);
       if (S.mimes[extOf(w.path)] !== 'text/html') return note('mime', w.path);
       nav({ entry: w.path });
     }, true);
@@ -216,7 +278,7 @@
             if (tag === 'style') st.textContent = await rewriteCss(el.textContent, S.dir, 1, []);
             else {
               const ref = el.getAttribute('href'), w = where(ref, S.dir);
-              if (!w.ok) throw fail('path', ref);
+              if (!w.ok) throw fail(w.why, ref);
               st.textContent = await css(w.path, 1, []);
             }
             el.replaceWith(st);
@@ -224,7 +286,7 @@
             const ref = el.getAttribute('src');
             if (!isRef(ref) || /^data:/i.test(ref)) continue;       // data and absolute urls are left to the page policy
             const w = where(ref, S.dir);
-            if (!w.ok) throw fail('path', ref);
+            if (!w.ok) throw fail(w.why, ref);
             el.setAttribute('src', await blobUrl(w.path));
           } else {
             const type = (el.getAttribute('type') || '').trim().toLowerCase(), src = el.getAttribute('src');
@@ -232,11 +294,11 @@
             if (!kind) continue;                                    // a data block (json, template) stays in the page and does not run
             el.remove();
             if (kind === 'map') throw fail('bare', 'an import map is not supported: vendor the dependencies and import them by relative path');
-            if (src === null) runs.push(kind === 'classic' ? { code: el.textContent } : { url: await link(el.textContent, S.dir, 1, []) });
+            if (src === null) runs.push(kind === 'classic' ? { code: el.textContent } : { url: await link(el.textContent, S.dir, 1, [], 'an inline module of the entry page') });
             else {
               if (!isRef(src)) throw fail('path', src);
               const w = where(src, S.dir);
-              if (!w.ok) throw fail('path', src);
+              if (!w.ok) throw fail(w.why, src);
               runs.push(kind === 'classic' ? { code: dec((await need(w.path)).bytes) } : { url: await mod(w.path, 1, []) });
             }
           }
